@@ -1,0 +1,182 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Chest X-ray Dashboard</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600;700;800&family=Space+Grotesk:wght@500;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/styles.css') }}">
+</head>
+<body>
+    <div class="dashboard-layout">
+        <aside class="sidebar">
+            <div class="brand-block">
+                <p class="brand-kicker">AI Radiology</p>
+                <h1>X-ray Desk</h1>
+            </div>
+
+            <nav class="menu">
+                <button class="menu-btn active" data-target="dashboard-section">
+                    <span class="icon">🏠</span>
+                    <span>Dashboard</span>
+                </button>
+                <button class="menu-btn" data-target="history-section">
+                    <span class="icon">🕘</span>
+                    <span>History</span>
+                </button>
+                <button class="menu-btn" data-target="report-section">
+                    <span class="icon">📄</span>
+                    <span>Download Report</span>
+                </button>
+                <button class="menu-btn" data-target="analytics-section">
+                    <span class="icon">📊</span>
+                    <span>Analytics</span>
+                </button>
+            </nav>
+
+            <p class="sidebar-note">Use sidebar tabs to switch views instantly.</p>
+            
+            <div class="sidebar-footer">
+                <p class="user-info">👤 {{ session.username }}</p>
+                <a href="{{ url_for('logout') }}" class="logout-btn">Sign Out</a>
+            </div>
+        </aside>
+
+        <main class="content-area">
+            <section id="dashboard-section" class="view-section active">
+                <section class="panel hero-panel reveal-up">
+                    <div class="title-block">
+                        <p class="kicker">Explainable Medical Imaging</p>
+                        <h2>Patient Screening Dashboard</h2>
+                        <p>Enter patient details, upload an X-ray, and inspect AI predictions with Grad-CAM explainability.</p>
+                    </div>
+
+                    <form id="uploadForm" class="upload-form" method="post" enctype="multipart/form-data">
+                        <div class="patient-grid">
+                            <div class="field-wrap">
+                                <label for="patientName">Patient Name</label>
+                                <input id="patientName" name="patient_name" type="text" placeholder="Enter patient full name" value="{{ patient_name }}" required>
+                            </div>
+                            <div class="field-wrap">
+                                <label for="patientAge">Age</label>
+                                <input id="patientAge" name="age" type="number" min="0" max="120" placeholder="Age" value="{{ patient_age }}" required>
+                            </div>
+                        </div>
+
+                        <div class="upload-zone" id="uploadZone" tabindex="0" role="button" aria-label="Drag and drop an X-ray image">
+                            <input id="fileInput" type="file" name="file" accept="image/*" required>
+                            <label for="fileInput" class="upload-label">
+                                <span class="upload-icon">+</span>
+                                <span class="upload-title">Drop chest X-ray or click to upload</span>
+                                <span class="upload-subtitle">Accepted: PNG, JPG, JPEG, BMP, WEBP</span>
+                            </label>
+                        </div>
+
+                        <div class="preview-wrap {% if not original_image %}hidden{% endif %}" id="previewWrap">
+                            <img id="previewImage" class="preview-image" src="{{ original_image or '' }}" alt="Uploaded preview">
+                        </div>
+
+                        {% if error_message %}
+                            <div class="alert error">{{ error_message }}</div>
+                        {% endif %}
+
+                        <button id="submitButton" class="primary-btn" type="submit">
+                            <span class="button-text">Analyze X-ray</span>
+                            <span class="button-spinner" aria-hidden="true"></span>
+                        </button>
+
+                        <div id="loadingState" class="loading-state hidden">
+                            <div class="spinner"></div>
+                            <p>Analyzing X-ray...</p>
+                        </div>
+                    </form>
+                </section>
+
+                {% if prediction %}
+                <section class="results-section reveal-up delay-1">
+                    <article class="panel summary-card">
+                        <p class="card-title">Prediction Summary</p>
+                        <h3>{{ prediction }}</h3>
+                        <div class="metric-row">
+                            <span>Main confidence</span>
+                            <strong>{{ confidence }}%</strong>
+                        </div>
+
+                        {% if top_two and top_two|length > 1 %}
+                        <div class="top-predictions">
+                            <p>Most likely: <b>{{ top_two[0].label }}</b> ({{ top_two[0].confidence }}%)</p>
+                            <p>Second likely: <b>{{ top_two[1].label }}</b> ({{ top_two[1].confidence }}%)</p>
+                        </div>
+                        {% endif %}
+
+                        <div class="chip-list">
+                            {% for item in probability_data %}
+                                <div class="chip {% if item.label == prediction %}active{% endif %}">
+                                    <span class="chip-label">{{ item.label }}</span>
+                                    <strong class="chip-value">{{ item.confidence }}%</strong>
+                                </div>
+                            {% endfor %}
+                        </div>
+
+                        {% if disease_predictions %}
+                        <div class="recommendation-list">
+                            {% for disease, details in disease_predictions.items() %}
+                                <div class="recommendation-item">
+                                    <div class="recommendation-header">
+                                        <strong>{{ disease }}</strong>
+                                        <span class="risk-badge risk-{{ details.color|lower }}">{{ details.risk_level }}</span>
+                                    </div>
+                                    <p>Recommended Specialist: {{ details.doctor_recommendation.specialist }}</p>
+                                    <p>Urgency: {{ details.doctor_recommendation.urgency }}</p>
+                                </div>
+                            {% endfor %}
+                        </div>
+                        {% endif %}
+                    </article>
+
+                    <article class="panel image-card">
+                        <p class="card-title">Uploaded Image</p>
+                        <img src="{{ original_image }}" alt="Uploaded X-ray">
+                    </article>
+
+                    <article class="panel image-card">
+                        <p class="card-title">Grad-CAM Heatmap</p>
+                        <img src="{{ heatmap_image }}" alt="Grad-CAM heatmap">
+                    </article>
+
+                    <article class="panel image-card">
+                        <p class="card-title">Overlay Image</p>
+                        <img src="{{ overlay_image }}" alt="Grad-CAM overlay">
+                    </article>
+                </section>
+                {% endif %}
+            </section>
+
+            {% include 'history.html' %}
+            {% include 'analytics.html' %}
+
+            <section id="report-section" class="view-section">
+                <article class="panel report-card">
+                    <p class="card-title">Download Patient Report</p>
+                    <h3>Generate PDF Summary</h3>
+                    <p class="report-text">Download the latest available patient prediction report in PDF format.</p>
+                    {% if latest_record_id %}
+                        <a class="primary-btn report-btn" href="{{ url_for('download_report', record_id=latest_record_id) }}">Download Latest Report</a>
+                    {% else %}
+                        <p class="empty-state">No records yet. Run a prediction first to generate reports.</p>
+                    {% endif %}
+                </article>
+            </section>
+        </main>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script>
+        window.probabilityData = {{ probability_data|tojson }};
+        window.latestRecordId = {{ latest_record_id|tojson }};
+    </script>
+    <script src="{{ url_for('static', filename='js/app.js') }}"></script>
+</body>
+</html>

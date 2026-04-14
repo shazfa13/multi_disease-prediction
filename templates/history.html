@@ -1,0 +1,46 @@
+<section id="history-section" class="view-section">
+    <article class="panel history-panel">
+        <div class="history-head">
+            <h3>Prediction History</h3>
+            <span>Total shown: {{ history_rows|length }}</span>
+        </div>
+
+        {% if history_rows %}
+        <div class="history-table-wrap">
+            <table class="history-table">
+                <thead>
+                    <tr>
+                        <th>Name</th>
+                        <th>Age</th>
+                        <th>Prediction</th>
+                        <th>Confidence</th>
+                        <th>Date</th>
+                        <th>Actions</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for row in history_rows %}
+                    <tr>
+                        <td>{{ row.patient_name or 'Unknown' }}</td>
+                        <td>{{ row.age if row.age is not none else '-' }}</td>
+                        <td>{{ row.prediction }}</td>
+                        <td>{{ row.confidence }}%</td>
+                        <td>{{ row.timestamp }}</td>
+                        <td>
+                            <div class="history-actions">
+                                <a class="table-link" href="{{ url_for('download_report', record_id=row.id) }}">PDF</a>
+                                <form method="post" action="{{ url_for('delete_report', record_id=row.id) }}" onsubmit="return confirm('Delete this report?');">
+                                    <button type="submit" class="table-button danger-button">Delete</button>
+                                </form>
+                            </div>
+                        </td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+        {% else %}
+            <p class="empty-state">No prediction records available yet.</p>
+        {% endif %}
+    </article>
+</section>

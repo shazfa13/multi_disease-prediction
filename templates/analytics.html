@@ -1,0 +1,13 @@
+<section id="analytics-section" class="view-section">
+    <article class="panel chart-card">
+        <p class="card-title">Analytics</p>
+        <h3>Class Probability Bar Graph</h3>
+        <p class="report-text">Confidence spread across COVID, NORMAL, PNEUMONIA, and TUBERCULOSIS for the latest analyzed X-ray.</p>
+        <div class="chart-wrap">
+            <canvas id="probabilityChart" aria-label="Prediction probabilities" role="img"></canvas>
+        </div>
+        {% if not probability_data %}
+            <p class="empty-state">Run a new prediction to populate analytics.</p>
+        {% endif %}
+    </article>
+</section>
