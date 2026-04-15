@@ -62,6 +62,9 @@ def create_data_generators(data_dir: str, batch_size: int):
         horizontal_flip=True,
         validation_split=0.2,
     )
+    validation_datagen = tf.keras.preprocessing.image.ImageDataGenerator(
+        validation_split=0.2,
+    )
 
     train_generator = train_datagen.flow_from_directory(
         data_dir,
@@ -73,7 +76,7 @@ def create_data_generators(data_dir: str, batch_size: int):
         shuffle=True,
     )
 
-    validation_generator = train_datagen.flow_from_directory(
+    validation_generator = validation_datagen.flow_from_directory(
         data_dir,
         target_size=IMAGE_SIZE,
         batch_size=batch_size,

@@ -4,11 +4,23 @@ from __future__ import annotations
 
 import cv2
 import numpy as np
-import tensorflow as tf
 
 
-def get_last_conv_layer_name(model: tf.keras.Model) -> str:
+def get_tensorflow():
+    try:
+        import tensorflow as tf
+    except ModuleNotFoundError as exc:
+        raise RuntimeError(
+            "TensorFlow is not installed in the active Python environment. "
+            "Activate the project .venv and run python app.py from there."
+        ) from exc
+
+    return tf
+
+
+def get_last_conv_layer_name(model) -> str:
     """Automatically find the last convolutional layer in a model."""
+    tf = get_tensorflow()
     for layer in reversed(model.layers):
         if isinstance(layer, tf.keras.layers.Conv2D):
             return layer.name
@@ -25,11 +37,12 @@ def get_last_conv_layer_name(model: tf.keras.Model) -> str:
 
 def make_gradcam_heatmap(
     image_array: np.ndarray,
-    model: tf.keras.Model,
+    model,
     last_conv_layer_name: str | None = None,
     class_index: int | None = None,
 ) -> np.ndarray:
     """Create a normalized Grad-CAM heatmap for a single image batch."""
+    tf = get_tensorflow()
     if last_conv_layer_name is None:
         last_conv_layer_name = get_last_conv_layer_name(model)
 
@@ -87,7 +100,7 @@ def save_heatmap_image(
 
 
 def generate_gradcam_visuals(
-    model: tf.keras.Model,
+    model,
     image_array: np.ndarray,
     original_rgb: np.ndarray,
     heatmap_output_path: str,

@@ -1,13 +1,18 @@
 <section id="analytics-section" class="view-section">
     <article class="panel chart-card">
         <p class="card-title">Analytics</p>
-        <h3>Class Probability Bar Graph</h3>
-        <p class="report-text">Confidence spread across COVID, NORMAL, PNEUMONIA, and TUBERCULOSIS for the latest analyzed X-ray.</p>
+        <h3>Per-Patient History Analytics</h3>
+        <p class="report-text">Confidence trend across saved patient records in your history (latest 30 records).</p>
         <div class="chart-wrap">
-            <canvas id="probabilityChart" aria-label="Prediction probabilities" role="img"></canvas>
+            <canvas id="historyAnalyticsChart" aria-label="Patient history analytics" role="img"></canvas>
         </div>
-        {% if not probability_data %}
-            <p class="empty-state">Run a new prediction to populate analytics.</p>
+        <h3>Disease-Wise Case Counts</h3>
+        <p class="report-text">Number of historical predictions per disease class for your saved records.</p>
+        <div class="chart-wrap">
+            <canvas id="diseaseCountChart" aria-label="Disease count analytics" role="img"></canvas>
+        </div>
+        {% if not history_analytics_data %}
+            <p class="empty-state">No history records available yet. Analyze an X-ray to populate analytics.</p>
         {% endif %}
     </article>
 </section>

@@ -12,8 +12,6 @@ import numpy as np
 
 # oneDNN can increase CPU memory usage for some graphs on low-memory systems.
 os.environ.setdefault("TF_ENABLE_ONEDNN_OPTS", "0")
-
-import tensorflow as tf
 from flask import Flask, abort, redirect, render_template, request, send_file, url_for, session
 from reportlab.lib import colors
 from reportlab.lib.pagesizes import A4
@@ -36,6 +34,10 @@ DB_PATH = os.path.join(BASE_DIR, "database.db")
 CLASS_NAMES = ["COVID", "NORMAL", "PNEUMONIA", "TUBERCULOSIS"]
 IMAGE_SIZE = (224, 224)
 ALLOWED_EXTENSIONS = {"png", "jpg", "jpeg", "bmp", "webp"}
+
+
+MODEL_CACHE = None
+INPUT_MODE_CACHE = None
 
 
 app = Flask(__name__)
@@ -126,21 +128,97 @@ init_db()
 # =========================
 # ✅ MODEL LOAD
 # =========================
-MODEL = tf.keras.models.load_model(MODEL_PATH, compile=False)
+def get_tensorflow():
+    try:
+        import tensorflow as tf
+    except ModuleNotFoundError as exc:
+        raise RuntimeError(
+            "TensorFlow is not installed in the active Python environment. "
+            "Activate the project .venv and run python app.py from there."
+        ) from exc
+
+    return tf
 
 
-def detect_input_mode(model: tf.keras.Model) -> str:
+def build_model():
+    """Rebuild the prediction model without relying on legacy HDF5 deserialization."""
+    tf = get_tensorflow()
+    base_model = tf.keras.applications.ResNet50(
+        include_top=False,
+        weights=None,
+        input_shape=(224, 224, 3),
+    )
+    base_model.trainable = False
+
+    inputs = tf.keras.Input(shape=(*IMAGE_SIZE, 3))
+    x = tf.keras.layers.Lambda(
+        tf.keras.applications.resnet.preprocess_input,
+        name="preprocess_input",
+    )(inputs)
+    x = base_model(x, training=False)
+    x = tf.keras.layers.Lambda(lambda t: t, name="last_conv_map")(x)
+    x = tf.keras.layers.GlobalAveragePooling2D()(x)
+    x = tf.keras.layers.Dropout(0.35)(x)
+    x = tf.keras.layers.Dense(256, activation="relu")(x)
+    x = tf.keras.layers.Dropout(0.25)(x)
+    outputs = tf.keras.layers.Dense(len(CLASS_NAMES), activation="softmax")(x)
+
+    return tf.keras.Model(inputs, outputs, name="chest_xray_resnet50")
+
+
+def load_prediction_model(model_path: str):
+    """Load the trained model artifact with strict fallback behavior."""
+    tf = get_tensorflow()
+
+    try:
+        return tf.keras.models.load_model(model_path, compile=False, safe_mode=False)
+    except Exception as load_exc:
+        # Fallback only for weights-only files; never use partial/mismatched loading
+        # because it can silently produce meaningless overconfident predictions.
+        model = build_model()
+        try:
+            model.load_weights(model_path)
+            return model
+        except Exception as weights_exc:
+            raise RuntimeError(
+                "Unable to load model.h5 as a full model or strict weights file. "
+                "Please re-export or retrain model/model.h5."
+            ) from weights_exc
+
+
+def get_prediction_model():
+    global MODEL_CACHE, INPUT_MODE_CACHE
+
+    if MODEL_CACHE is None:
+        MODEL_CACHE = load_prediction_model(MODEL_PATH)
+        INPUT_MODE_CACHE = detect_input_mode(MODEL_CACHE)
+
+    return MODEL_CACHE
+
+
+def get_input_mode() -> str:
+    if INPUT_MODE_CACHE is None:
+        get_prediction_model()
+    return INPUT_MODE_CACHE or "unit"
+
+
+def detect_input_mode(model) -> str:
     """Infer expected input scaling from the loaded model graph."""
-    for layer in model.layers[:12]:
+    tf = get_tensorflow()
+    for layer in model.layers[:20]:
         name = layer.name.lower()
         if "preprocess" in name:
             return "raw255"
         if isinstance(layer, tf.keras.layers.Rescaling):
             return "raw255"
+        if isinstance(layer, tf.keras.layers.Lambda):
+            try:
+                fn_text = str(layer.get_config().get("function", "")).lower()
+                if "preprocess_input" in fn_text:
+                    return "raw255"
+            except Exception:
+                pass
     return "unit"
-
-
-INPUT_MODE = detect_input_mode(MODEL)
 
 
 # =========================
@@ -152,15 +230,13 @@ def preprocess_image(path):
         raise ValueError("Uploaded file could not be read as an image")
 
     img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-    img_resized = cv2.resize(img, (224, 224))
-    img_ready = img_resized.astype(np.float32)
+    img_resized = cv2.resize(img, (224, 224)).astype(np.float32)
+    raw_batch = np.expand_dims(img_resized, axis=0)
+    unit_batch = np.expand_dims(img_resized / 255.0, axis=0)
 
-    # Some saved models include preprocessing layers; others expect 0-1 input.
-    if INPUT_MODE == "unit":
-        img_ready = img_ready / 255.0
-
-    img_exp = np.expand_dims(img_ready, axis=0)
-    return img_exp, img
+    if get_input_mode() == "unit":
+        return unit_batch, raw_batch, img
+    return raw_batch, unit_batch, img
 
 
 # =========================
@@ -194,20 +270,46 @@ def normalize_probabilities(raw_output: np.ndarray) -> np.ndarray:
 # =========================
 # ✅ PREDICTION
 # =========================
-def predict_image(image_batch):
-    raw = MODEL.predict(image_batch, verbose=0)[0]
-    probs = normalize_probabilities(raw)
+def _prediction_entropy(probs: np.ndarray) -> float:
+    safe = np.clip(probs, 1e-8, 1.0)
+    return float(-np.sum(safe * np.log(safe)))
+
+
+def choose_probabilities(primary_probs: np.ndarray, secondary_probs: np.ndarray | None) -> tuple[np.ndarray, bool]:
+    """Choose the most reliable probability vector between two preprocessing modes."""
+    if secondary_probs is None:
+        return primary_probs, False
+
+    p1_max = float(np.max(primary_probs))
+    p2_max = float(np.max(secondary_probs))
+    p1_entropy = _prediction_entropy(primary_probs)
+    p2_entropy = _prediction_entropy(secondary_probs)
+
+    primary_saturated = p1_max >= 0.999
+    secondary_healthier = (p2_max <= 0.995) or (p2_entropy > p1_entropy + 0.15)
+    if primary_saturated and secondary_healthier:
+        return secondary_probs, True
+
+    return primary_probs, False
+
+
+def predict_image(model, image_batch, fallback_batch=None):
+    raw_primary = model.predict(image_batch, verbose=0)[0]
+    primary_probs = normalize_probabilities(raw_primary)
+
+    secondary_probs = None
+    if fallback_batch is not None:
+        raw_secondary = model.predict(fallback_batch, verbose=0)[0]
+        secondary_probs = normalize_probabilities(raw_secondary)
+
+    probs, used_fallback = choose_probabilities(primary_probs, secondary_probs)
+    chosen_batch = fallback_batch if used_fallback else image_batch
 
     idx = np.argmax(probs)
     prediction = CLASS_NAMES[idx]
     confidence = float(probs[idx])
 
-    if len(probs) > 1:
-        second = float(np.partition(probs, -2)[-2])
-    else:
-        second = 0.0
-
-    return prediction, confidence, probs
+    return prediction, confidence, probs, chosen_batch
 
 
 def get_risk_level(probability: float) -> dict[str, str]:
@@ -357,6 +459,26 @@ def fetch_history(user_id: int, limit: int = 25) -> list[dict[str, Any]]:
             (user_id, limit),
         ).fetchall()
     return [dict(row) for row in rows]
+
+
+def build_history_analytics(history_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Prepare per-patient chart points from prediction history."""
+    points: list[dict[str, Any]] = []
+    for row in reversed(history_rows):
+        patient_name = (row.get("patient_name") or "Unknown").strip() or "Unknown"
+        timestamp = str(row.get("timestamp") or "")
+        short_time = timestamp[5:16] if len(timestamp) >= 16 else timestamp
+        points.append(
+            {
+                "id": row.get("id"),
+                "label": f"{patient_name} ({short_time})" if short_time else patient_name,
+                "patient_name": patient_name,
+                "prediction": row.get("prediction") or "-",
+                "confidence": round(float(row.get("confidence") or 0.0), 2),
+                "timestamp": timestamp,
+            }
+        )
+    return points
 
 
 def fetch_record(record_id: int) -> dict[str, Any] | None:
@@ -521,108 +643,154 @@ def logout():
 @app.route("/dashboard", methods=["GET", "POST"])
 @login_required
 def dashboard():
-    prediction = None
-    confidence = None
-    probability_data = []
-    disease_predictions: dict[str, dict[str, Any]] = {}
-    top_two: list[dict[str, Any]] = []
-    original_image = None
-    heatmap_image = None
-    overlay_image = None
-    error_message = None
     patient_name = ""
     patient_age = ""
     user_id = session.get('user_id')
-
-    if request.method == "POST":
-        try:
-            if "file" not in request.files:
-                raise ValueError("Please select an image file")
-
-            file = request.files["file"]
-            patient_name = (request.form.get("patient_name") or "").strip()
-            patient_age = (request.form.get("age") or "").strip()
-
-            if file.filename == "":
-                raise ValueError("No file selected")
-
-            if not allowed_file(file.filename):
-                raise ValueError("Unsupported file format. Use PNG, JPG, JPEG, BMP, or WEBP.")
-
-            if file.mimetype and not file.mimetype.startswith("image/"):
-                raise ValueError("Uploaded file is not an image")
-
-            filename = secure_filename(file.filename)
-            unique_name = str(uuid.uuid4()) + "_" + filename
-            path = os.path.join(UPLOAD_DIR, unique_name)
-            file.save(path)
-
-            img_batch, original = preprocess_image(path)
-
-            # 🔥 VALIDATION
-            if not is_xray_like(original):
-                os.remove(path)
-                raise ValueError("Not a valid chest X-ray image")
-
-            prediction, confidence, probs = predict_image(img_batch)
-
-            sorted_idx = np.argsort(probs)[::-1]
-            top_two = [
-                {"label": CLASS_NAMES[i], "confidence": round(float(probs[i]) * 100.0, 2)}
-                for i in sorted_idx[:2]
-            ]
-
-            probability_data = [
-                {"label": CLASS_NAMES[i], "confidence": round(float(probs[i]) * 100.0, 2)}
-                for i in range(len(CLASS_NAMES))
-            ]
-            disease_predictions = build_disease_predictions(probs)
-
-            heatmap_name = f"heatmap_{uuid.uuid4().hex}.jpg"
-            overlay_name = f"overlay_{uuid.uuid4().hex}.jpg"
-
-            heatmap_path = os.path.join(HEATMAP_DIR, heatmap_name)
-            overlay_path = os.path.join(HEATMAP_DIR, overlay_name)
-
-            generate_gradcam_visuals(
-                model=MODEL,
-                image_array=img_batch,
-                original_rgb=original,
-                heatmap_output_path=heatmap_path,
-                overlay_output_path=overlay_path,
-                class_index=int(np.argmax(probs)),
-                last_conv_layer_name=get_last_conv_layer_name(MODEL),
-            )
-
-            original_image = url_for("static", filename="uploads/" + unique_name)
-            heatmap_image = url_for("static", filename="heatmaps/" + heatmap_name)
-            overlay_image = url_for("static", filename="heatmaps/" + overlay_name)
-
-            confidence = round(confidence * 100, 2)
-            age_value = int(patient_age) if patient_age.isdigit() else None
-            save_prediction_record(user_id, patient_name, age_value, unique_name, prediction, confidence)
-
-        except Exception as e:
-            traceback.print_exc()
-            error_message = str(e)
+    error_message = session.pop("analysis_error", None)
+    form_state = session.pop("analysis_form_state", None)
+    if isinstance(form_state, dict):
+        patient_name = form_state.get("patient_name", "")
+        patient_age = form_state.get("patient_age", "")
 
     history_rows = fetch_history(user_id, limit=30)
+    history_analytics_data = build_history_analytics(history_rows)
     latest_record_id = history_rows[0]["id"] if history_rows else None
 
     return render_template(
         "index.html",
-        prediction=prediction,
-        confidence=confidence,
-        probability_data=probability_data,
-        disease_predictions=disease_predictions,
-        top_two=top_two,
-        original_image=original_image,
-        heatmap_image=heatmap_image,
-        overlay_image=overlay_image,
+        probability_data=[],
         error_message=error_message,
         patient_name=patient_name,
         patient_age=patient_age,
         history_rows=history_rows,
+        history_analytics_data=history_analytics_data,
+        latest_record_id=latest_record_id,
+    )
+
+
+@app.route("/analyze", methods=["POST"])
+@login_required
+def analyze_xray():
+    user_id = session.get('user_id')
+    patient_name = (request.form.get("patient_name") or "").strip()
+    patient_age = (request.form.get("age") or "").strip()
+    session["analysis_form_state"] = {
+        "patient_name": patient_name,
+        "patient_age": patient_age,
+    }
+
+    try:
+        if "file" not in request.files:
+            raise ValueError("Please select an image file")
+
+        file = request.files["file"]
+        if file.filename == "":
+            raise ValueError("No file selected")
+
+        if not allowed_file(file.filename):
+            raise ValueError("Unsupported file format. Use PNG, JPG, JPEG, BMP, or WEBP.")
+
+        if file.mimetype and not file.mimetype.startswith("image/"):
+            raise ValueError("Uploaded file is not an image")
+
+        filename = secure_filename(file.filename)
+        unique_name = str(uuid.uuid4()) + "_" + filename
+        path = os.path.join(UPLOAD_DIR, unique_name)
+        file.save(path)
+
+        model = get_prediction_model()
+        img_batch, fallback_batch, original = preprocess_image(path)
+
+        if not is_xray_like(original):
+            os.remove(path)
+            raise ValueError("Not a valid chest X-ray image")
+
+        prediction, confidence, probs, gradcam_batch = predict_image(model, img_batch, fallback_batch)
+
+        sorted_idx = np.argsort(probs)[::-1]
+        top_two = [
+            {"label": CLASS_NAMES[i], "confidence": round(float(probs[i]) * 100.0, 2)}
+            for i in sorted_idx[:2]
+        ]
+
+        probability_data = [
+            {"label": CLASS_NAMES[i], "confidence": round(float(probs[i]) * 100.0, 2)}
+            for i in range(len(CLASS_NAMES))
+        ]
+        disease_predictions = build_disease_predictions(probs)
+
+        heatmap_name = f"heatmap_{uuid.uuid4().hex}.jpg"
+        overlay_name = f"overlay_{uuid.uuid4().hex}.jpg"
+
+        heatmap_path = os.path.join(HEATMAP_DIR, heatmap_name)
+        overlay_path = os.path.join(HEATMAP_DIR, overlay_name)
+
+        generate_gradcam_visuals(
+            model=model,
+            image_array=gradcam_batch,
+            original_rgb=original,
+            heatmap_output_path=heatmap_path,
+            overlay_output_path=overlay_path,
+            class_index=int(np.argmax(probs)),
+            last_conv_layer_name=get_last_conv_layer_name(model),
+        )
+
+        original_image = url_for("static", filename="uploads/" + unique_name)
+        heatmap_image = url_for("static", filename="heatmaps/" + heatmap_name)
+        overlay_image = url_for("static", filename="heatmaps/" + overlay_name)
+
+        confidence_pct = round(confidence * 100, 2)
+        age_value = int(patient_age) if patient_age.isdigit() else None
+        save_prediction_record(user_id, patient_name, age_value, unique_name, prediction, confidence_pct)
+
+        session["latest_analysis"] = {
+            "prediction": prediction,
+            "confidence": confidence_pct,
+            "probability_data": probability_data,
+            "disease_predictions": disease_predictions,
+            "top_two": top_two,
+            "original_image": original_image,
+            "heatmap_image": heatmap_image,
+            "overlay_image": overlay_image,
+            "patient_name": patient_name,
+            "patient_age": patient_age,
+        }
+        session.pop("analysis_error", None)
+        return redirect(url_for("analysis"))
+
+    except Exception as e:
+        traceback.print_exc()
+        session.pop("latest_analysis", None)
+        session["analysis_error"] = str(e)
+        return redirect(url_for("dashboard"))
+
+
+@app.route("/analysis", methods=["GET"])
+@login_required
+def analysis():
+    analysis_data = session.get("latest_analysis")
+    if not analysis_data:
+        return redirect(url_for("dashboard"))
+
+    user_id = session.get('user_id')
+    history_rows = fetch_history(user_id, limit=30)
+    history_analytics_data = build_history_analytics(history_rows)
+    latest_record_id = history_rows[0]["id"] if history_rows else None
+
+    return render_template(
+        "analysis.html",
+        prediction=analysis_data.get("prediction"),
+        confidence=analysis_data.get("confidence"),
+        probability_data=analysis_data.get("probability_data", []),
+        disease_predictions=analysis_data.get("disease_predictions", {}),
+        top_two=analysis_data.get("top_two", []),
+        original_image=analysis_data.get("original_image"),
+        heatmap_image=analysis_data.get("heatmap_image"),
+        overlay_image=analysis_data.get("overlay_image"),
+        patient_name=analysis_data.get("patient_name", ""),
+        patient_age=analysis_data.get("patient_age", ""),
+        history_rows=history_rows,
+        history_analytics_data=history_analytics_data,
         latest_record_id=latest_record_id,
     )
 

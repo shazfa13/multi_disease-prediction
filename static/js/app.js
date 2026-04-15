@@ -99,10 +99,18 @@
         }
     });
 
-    const chartCanvas = document.getElementById('probabilityChart');
-    if (chartCanvas && window.Chart && Array.isArray(window.probabilityData) && window.probabilityData.length > 0) {
-        const labels = window.probabilityData.map((item) => item.label);
-        const values = window.probabilityData.map((item) => item.confidence);
+    const chartCanvas = document.getElementById('historyAnalyticsChart');
+    if (chartCanvas && window.Chart && Array.isArray(window.historyAnalyticsData) && window.historyAnalyticsData.length > 0) {
+        const colorByPrediction = {
+            COVID: 'rgba(239, 68, 68, 0.82)',
+            NORMAL: 'rgba(34, 197, 94, 0.82)',
+            PNEUMONIA: 'rgba(59, 130, 246, 0.82)',
+            TUBERCULOSIS: 'rgba(245, 158, 11, 0.82)'
+        };
+
+        const labels = window.historyAnalyticsData.map((item) => item.label);
+        const values = window.historyAnalyticsData.map((item) => item.confidence);
+        const colors = window.historyAnalyticsData.map((item) => colorByPrediction[item.prediction] || 'rgba(148, 163, 184, 0.82)');
         const ctx = chartCanvas.getContext('2d');
 
         new Chart(ctx, {
@@ -111,14 +119,9 @@
                 labels: labels,
                 datasets: [
                     {
-                        label: 'Confidence (%)',
+                        label: 'Saved Confidence (%)',
                         data: values,
-                        backgroundColor: [
-                            'rgba(59, 130, 246, 0.82)',
-                            'rgba(30, 58, 138, 0.82)',
-                            'rgba(96, 165, 250, 0.82)',
-                            'rgba(37, 99, 235, 0.82)'
-                        ],
+                        backgroundColor: colors,
                         borderColor: 'rgba(96, 165, 250, 1)',
                         borderWidth: 1,
                         borderRadius: 8,
@@ -140,7 +143,100 @@
                     },
                     tooltip: {
                         callbacks: {
-                            label: (context) => `${context.raw}%`
+                            label: (context) => {
+                                const point = window.historyAnalyticsData[context.dataIndex];
+                                const diagnosis = point?.prediction || '-';
+                                return `${context.raw}% | ${diagnosis}`;
+                            }
+                        }
+                    }
+                },
+                scales: {
+                    x: {
+                        grid: {
+                            color: 'rgba(148, 163, 184, 0.14)'
+                        },
+                        ticks: {
+                            color: '#cbd5e1',
+                            maxRotation: 45,
+                            minRotation: 30,
+                            autoSkip: true,
+                            maxTicksLimit: 10
+                        }
+                    },
+                    y: {
+                        beginAtZero: true,
+                        suggestedMax: 100,
+                        grid: {
+                            color: 'rgba(148, 163, 184, 0.14)'
+                        },
+                        ticks: {
+                            color: '#cbd5e1',
+                            callback: (value) => `${value}%`
+                        }
+                    }
+                }
+            }
+        });
+    }
+
+    const diseaseCountCanvas = document.getElementById('diseaseCountChart');
+    if (diseaseCountCanvas && window.Chart && Array.isArray(window.historyAnalyticsData) && window.historyAnalyticsData.length > 0) {
+        const diseaseOrder = ['COVID', 'NORMAL', 'PNEUMONIA', 'TUBERCULOSIS'];
+        const diseaseCounts = {
+            COVID: 0,
+            NORMAL: 0,
+            PNEUMONIA: 0,
+            TUBERCULOSIS: 0
+        };
+
+        window.historyAnalyticsData.forEach((item) => {
+            const key = String(item?.prediction || '').toUpperCase();
+            if (Object.prototype.hasOwnProperty.call(diseaseCounts, key)) {
+                diseaseCounts[key] += 1;
+            }
+        });
+
+        const labels = diseaseOrder;
+        const values = diseaseOrder.map((disease) => diseaseCounts[disease]);
+        const ctx = diseaseCountCanvas.getContext('2d');
+
+        new Chart(ctx, {
+            type: 'bar',
+            data: {
+                labels: labels,
+                datasets: [
+                    {
+                        label: 'Cases',
+                        data: values,
+                        backgroundColor: [
+                            'rgba(239, 68, 68, 0.82)',
+                            'rgba(34, 197, 94, 0.82)',
+                            'rgba(59, 130, 246, 0.82)',
+                            'rgba(245, 158, 11, 0.82)'
+                        ],
+                        borderColor: 'rgba(148, 163, 184, 0.95)',
+                        borderWidth: 1,
+                        borderRadius: 8,
+                        maxBarThickness: 70
+                    }
+                ]
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                plugins: {
+                    legend: {
+                        labels: {
+                            color: '#dbeafe',
+                            font: {
+                                family: 'Outfit'
+                            }
+                        }
+                    },
+                    tooltip: {
+                        callbacks: {
+                            label: (context) => `${context.raw} cases`
                         }
                     }
                 },
@@ -155,13 +251,12 @@
                     },
                     y: {
                         beginAtZero: true,
-                        suggestedMax: 100,
+                        ticks: {
+                            precision: 0,
+                            color: '#cbd5e1'
+                        },
                         grid: {
                             color: 'rgba(148, 163, 184, 0.14)'
-                        },
-                        ticks: {
-                            color: '#cbd5e1',
-                            callback: (value) => `${value}%`
                         }
                     }
                 }
